@@ -71,6 +71,7 @@ interface ReviewState {
 	jsonEvents: JsonObject[];
 	reviewEvents: JsonObject[];
 	findings: CodeRabbitFinding[];
+	reportedFindingCount?: number;
 	errorEvents: JsonObject[];
 	reviewContext?: JsonObject;
 	plainStdoutLines: string[];
@@ -107,6 +108,7 @@ interface ReviewSnapshot {
 	jsonEventCount: number;
 	reviewEventCount: number;
 	findingCount: number;
+	reportedFindingCount?: number;
 	errorEventCount: number;
 	severityCounts: SeverityCounts;
 	plainStdoutLineCount: number;
@@ -151,13 +153,38 @@ function stringField(event: JsonObject, key: string): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-function parseJsonLine(line: string): JsonObject | undefined {
+function numberField(event: JsonObject, key: string): number | undefined {
+	const value = event[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stripAnsiControlSequences(text: string): string {
+	return text
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "")
+		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/gu, "")
+		.replace(/\x1b[@-_][0-?]*[ -/]*[@-~]/gu, "");
+}
+
+function parseJsonCandidate(candidate: string): JsonObject | undefined {
 	try {
-		const parsed: unknown = JSON.parse(line);
+		const parsed: unknown = JSON.parse(candidate);
 		return isJsonObject(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+function parseJsonLine(line: string): JsonObject | undefined {
+	const cleaned = stripAnsiControlSequences(line).trim();
+	if (!cleaned) return undefined;
+
+	const parsed = parseJsonCandidate(cleaned);
+	if (parsed) return parsed;
+
+	const objectStart = cleaned.indexOf("{");
+	const objectEnd = cleaned.lastIndexOf("}");
+	if (objectStart === -1 || objectEnd <= objectStart) return undefined;
+	return parseJsonCandidate(cleaned.slice(objectStart, objectEnd + 1));
 }
 
 function isStatusEvent(event: JsonObject): boolean {
@@ -372,6 +399,7 @@ function snapshotState(state: ReviewState): ReviewSnapshot {
 		jsonEventCount: state.jsonEvents.length,
 		reviewEventCount: state.reviewEvents.length,
 		findingCount: state.findings.length,
+		reportedFindingCount: state.reportedFindingCount,
 		errorEventCount: state.errorEvents.length,
 		severityCounts: countFindingsBySeverity(state.findings),
 		plainStdoutLineCount: state.plainStdoutLines.length,
@@ -442,6 +470,8 @@ function buildWidgetLines(snapshot: ReviewSnapshot, theme: Theme): string[] {
 
 	if (snapshot.findingCount > 0) {
 		lines.push(theme.fg("warning", `${snapshot.findingCount} finding(s): ${summarizeSeverityCounts(snapshot.severityCounts)}`));
+	} else if ((snapshot.reportedFindingCount ?? 0) > 0) {
+		lines.push(theme.fg("warning", `CodeRabbit reported ${snapshot.reportedFindingCount} finding(s), but no finding payloads were parsed`));
 	} else if (snapshot.finishedAt && success) {
 		lines.push(theme.fg("success", "No findings reported"));
 	}
@@ -470,7 +500,7 @@ function buildProgressText(snapshot: ReviewSnapshot): string {
 		`CodeRabbit review in progress`,
 		formatReviewScope(snapshot.args),
 		`Status: ${humanize(latest?.phase)} / ${humanize(latest?.status)}`,
-		`Findings: ${snapshot.findingCount} (${summarizeSeverityCounts(snapshot.severityCounts)})`,
+		`Findings: ${snapshot.findingCount} parsed${snapshot.reportedFindingCount !== undefined ? ` / ${snapshot.reportedFindingCount} reported` : ""} (${summarizeSeverityCounts(snapshot.severityCounts)})`,
 		`Events: ${snapshot.reviewEventCount} review, ${snapshot.jsonEventCount} JSON total`,
 	];
 	return lines.join("\n");
@@ -568,6 +598,11 @@ function processJsonEvent(state: ReviewState, event: JsonObject): void {
 		state.errorEvents.push(event);
 		return;
 	}
+	if (eventType === "complete") {
+		const reportedFindings = numberField(event, "findings");
+		if (reportedFindings !== undefined) state.reportedFindingCount = reportedFindings;
+		return;
+	}
 
 	const finding = parseFinding(event);
 	if (finding) state.findings.push(finding);
@@ -587,6 +622,11 @@ function processStdoutLine(state: ReviewState, line: string): void {
 function processStderrLine(state: ReviewState, line: string): void {
 	const trimmed = line.trim();
 	if (!trimmed) return;
+	const event = parseJsonLine(trimmed);
+	if (event) {
+		processJsonEvent(state, event);
+		return;
+	}
 	state.stderrLines.push(line);
 }
 
@@ -750,11 +790,18 @@ function buildFindingReport(state: ReviewState): string {
 	}
 
 	if (state.findings.length === 0) {
-		lines.push("No CodeRabbit findings were reported.");
+		if ((state.reportedFindingCount ?? 0) > 0) {
+			lines.push(`CodeRabbit reported ${state.reportedFindingCount} finding(s), but no finding payloads were parsed.`);
+		} else {
+			lines.push("No CodeRabbit findings were reported.");
+		}
 		return lines.join("\n").trim();
 	}
 
-	lines.push(`CodeRabbit findings: ${state.findings.length} (${summarizeSeverityCounts(countFindingsBySeverity(state.findings))})`, "");
+	const findingHeadline = state.reportedFindingCount !== undefined
+		? `CodeRabbit findings: ${state.findings.length} parsed / ${state.reportedFindingCount} reported (${summarizeSeverityCounts(countFindingsBySeverity(state.findings))})`
+		: `CodeRabbit findings: ${state.findings.length} (${summarizeSeverityCounts(countFindingsBySeverity(state.findings))})`;
+	lines.push(findingHeadline, "");
 
 	for (const [fileName, findings] of groupFindingsByFile(state.findings)) {
 		lines.push(`## ${fileName}`);
@@ -797,13 +844,16 @@ async function buildResult(state: ReviewState): Promise<ReviewResult> {
 	const success = state.exitCode === 0 && !state.timedOut && !state.aborted && state.errorEvents.length === 0;
 	const duration = formatDuration((state.finishedAt ?? Date.now()) - state.startedAt);
 	const latest = latestStatus(state);
+	const findingCountText = state.reportedFindingCount !== undefined
+		? `${state.findings.length} parsed / ${state.reportedFindingCount} reported`
+		: `${state.findings.length}`;
 	const lines = [
 		`CodeRabbit review ${success ? "completed" : "failed"}`,
 		`Command: ${formatCommand(state.command, state.args)}`,
 		formatReviewScope(state.args),
 		`Duration: ${duration}`,
 		`Latest status: ${humanize(latest?.phase)} / ${humanize(latest?.status)}`,
-		`Findings: ${state.findings.length} (${summarizeSeverityCounts(countFindingsBySeverity(state.findings))})`,
+		`Findings: ${findingCountText} (${summarizeSeverityCounts(countFindingsBySeverity(state.findings))})`,
 		`Events: ${state.reviewEvents.length} review event(s), ${state.jsonEvents.length} JSON event(s) total`,
 	];
 
@@ -836,12 +886,12 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 	let activeState: ReviewState | undefined;
 	let latestSnapshot: ReviewSnapshot | undefined;
 
-	function applyReviewUi(ctx: ExtensionContext, state: ReviewState): void {
+	function applyReviewUi(ctx: ExtensionContext, state: ReviewState, options: { showWidget: boolean }): void {
 		const snapshot = snapshotState(state);
 		latestSnapshot = snapshot;
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus(STATUS_KEY, buildStatusText(snapshot, ctx.ui.theme));
-		ctx.ui.setWidget(WIDGET_KEY, buildWidgetLines(snapshot, ctx.ui.theme));
+		ctx.ui.setWidget(WIDGET_KEY, options.showWidget ? buildWidgetLines(snapshot, ctx.ui.theme) : undefined);
 
 		if (!state.finishedAt && envFlagEnabled("PI_CODERABBIT_WORKING_INDICATOR", true)) {
 			ctx.ui.setWorkingMessage(`CodeRabbit: ${humanize(snapshot.currentStatus)}`);
@@ -869,11 +919,11 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 		ctx.ui.setWorkingIndicator();
 	}
 
-	function publishProgress(ctx: ExtensionContext, state: ReviewState, onUpdate?: ToolUpdate): void {
-		applyReviewUi(ctx, state);
-		if (!onUpdate) return;
+	function publishProgress(ctx: ExtensionContext, state: ReviewState, options: { showWidget: boolean; onUpdate?: ToolUpdate }): void {
+		applyReviewUi(ctx, state, { showWidget: options.showWidget });
+		if (!options.onUpdate) return;
 		const snapshot = snapshotState(state);
-		onUpdate({
+		options.onUpdate({
 			content: [{ type: "text", text: buildProgressText(snapshot) }],
 			details: {
 				kind: "pi-coderabbit",
@@ -886,7 +936,7 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 	async function runReview(
 		ctx: ExtensionContext,
 		rawArgs: string[],
-		options: { signal?: AbortSignal; timeoutMs?: number; onUpdate?: ToolUpdate } = {},
+		options: { signal?: AbortSignal; timeoutMs?: number; onUpdate?: ToolUpdate; showWidget?: boolean } = {},
 	): Promise<ReviewResult> {
 		if (activeController) {
 			throw new Error("A CodeRabbit review is already running. Use /coderabbit-cancel to stop it first.");
@@ -895,6 +945,7 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 		const args = normalizeReviewArgs(rawArgs);
 		const state = createReviewState(ctx.cwd, args);
 		const candidates = commandCandidates();
+		const showWidget = options.showWidget ?? true;
 		const controller = new AbortController();
 		const timeoutMs = options.timeoutMs ?? envNumber("PI_CODERABBIT_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
 		activeController = controller;
@@ -906,12 +957,12 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 
 		try {
 			recordStatus(state, "setup", "starting_cli");
-			publishProgress(ctx, state, options.onUpdate);
+			publishProgress(ctx, state, { showWidget, onUpdate: options.onUpdate });
 
 			let lastError: unknown;
 			for (const command of candidates) {
 				state.command = command;
-				publishProgress(ctx, state, options.onUpdate);
+				publishProgress(ctx, state, { showWidget, onUpdate: options.onUpdate });
 				try {
 					const exit = await runProcess({
 						command,
@@ -921,11 +972,11 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 						timeoutMs,
 						onStdoutLine: (line) => {
 							processStdoutLine(state, line);
-							publishProgress(ctx, state, options.onUpdate);
+							publishProgress(ctx, state, { showWidget, onUpdate: options.onUpdate });
 						},
 						onStderrLine: (line) => {
 							processStderrLine(state, line);
-							publishProgress(ctx, state, options.onUpdate);
+							publishProgress(ctx, state, { showWidget, onUpdate: options.onUpdate });
 						},
 					});
 					state.exitCode = exit.code;
@@ -965,7 +1016,7 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 		}
 
 		const result = await buildResult(state);
-		applyReviewUi(ctx, state);
+		applyReviewUi(ctx, state, { showWidget });
 		return result;
 	}
 
@@ -1060,6 +1111,7 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 				signal,
 				timeoutMs: params.timeoutMs,
 				onUpdate: onUpdate as ToolUpdate | undefined,
+				showWidget: false,
 			});
 			const details: CodeRabbitToolDetails = {
 				kind: "pi-coderabbit",

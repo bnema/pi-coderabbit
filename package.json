@@ -1,6 +1,6 @@
 {
   "name": "pi-coderabbit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi package that turns CodeRabbit CLI agent JSON output into live review progress UI.",
   "license": "MIT",
   "author": "bnema",
