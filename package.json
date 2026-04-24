@@ -1,0 +1,54 @@
+{
+  "name": "pi-coderabbit",
+  "version": "0.1.0",
+  "description": "Pi package that turns CodeRabbit CLI agent JSON output into live review progress UI.",
+  "license": "MIT",
+  "author": "bnema",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coderabbit",
+    "code-review",
+    "review"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bnema/pi-coderabbit.git"
+  },
+  "homepage": "https://github.com/bnema/pi-coderabbit",
+  "bugs": {
+    "url": "https://github.com/bnema/pi-coderabbit/issues"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE",
+    "tsconfig.json"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.1.24",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
