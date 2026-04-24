@@ -62,9 +62,10 @@ Run CodeRabbit against main and summarize the findings.
 
 Slash commands:
 
-- `/coderabbit-review` — run `coderabbit review --agent`
-- `/coderabbit-review --type uncommitted` — pass extra CodeRabbit review args
-- `/coderabbit-review --base main --type committed` — compare against a base branch
+- `/coderabbit-review` — run `coderabbit review --agent` with CodeRabbit's default `--type all` scope
+- `/coderabbit-review --type uncommitted` — review only uncommitted working tree changes
+- `/coderabbit-review --type committed --base main` — review committed changes against `main`
+- `/coderabbit-review --type all --base main` — review committed + uncommitted local changes against `main`
 - `/coderabbit-status` — show latest review state
 - `/coderabbit-cancel` — abort the current review
 - `/coderabbit-clear` — clear the status/widget UI
@@ -79,6 +80,30 @@ Tool parameters:
 ```
 
 The extension always forces CodeRabbit agent mode by running `coderabbit review --agent ...`.
+
+## Default review scope
+
+With no arguments, `/coderabbit-review` runs:
+
+```bash
+coderabbit review --agent
+```
+
+CodeRabbit's `review` command defaults to:
+
+```bash
+--type all
+```
+
+So the no-argument command reviews **committed + uncommitted local changes**. If you do not pass `--base` or `--base-commit`, the base is inferred by CodeRabbit.
+
+The pi widget and final result now show the effective scope, for example:
+
+```text
+Scope: default --type all (committed + uncommitted local changes); base inferred by CodeRabbit
+```
+
+Use explicit args when you want a narrower or clearer review target.
 
 ## CodeRabbit JSONL support
 

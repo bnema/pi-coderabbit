@@ -29,7 +29,7 @@ const ReviewParamsSchema = Type.Object({
 	args: Type.Optional(
 		Type.Array(Type.String(), {
 			description:
-				"Extra CodeRabbit CLI arguments. The extension always forces --agent for JSONL output.",
+				"Extra CodeRabbit review arguments. The extension runs `coderabbit review --agent`. With no args, CodeRabbit uses its default `--type all` scope: committed + uncommitted local changes, with the base inferred by CodeRabbit.",
 		}),
 	),
 	timeoutMs: Type.Optional(
@@ -260,6 +260,71 @@ function normalizeReviewArgs(args: string[]): string[] {
 	return ["review", "--agent", ...merged];
 }
 
+function findFlagValue(args: string[], names: string[]): { value: string; explicit: true } | undefined {
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		for (const name of names) {
+			if (arg === name) {
+				const value = args[index + 1];
+				if (value && !value.startsWith("-")) return { value, explicit: true };
+			}
+			const prefix = `${name}=`;
+			if (arg.startsWith(prefix)) return { value: arg.slice(prefix.length), explicit: true };
+		}
+	}
+	return undefined;
+}
+
+function findFlagValues(args: string[], names: string[]): string[] {
+	const values: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		for (const name of names) {
+			const prefix = `${name}=`;
+			if (arg.startsWith(prefix)) values.push(arg.slice(prefix.length));
+			if (arg !== name) continue;
+			for (let valueIndex = index + 1; valueIndex < args.length; valueIndex++) {
+				const value = args[valueIndex]!;
+				if (value.startsWith("-")) break;
+				values.push(value);
+			}
+		}
+	}
+	return values;
+}
+
+function formatReviewScope(args: string[]): string {
+	const typeFlag = findFlagValue(args, ["--type", "-t"]);
+	const reviewType = typeFlag?.value ?? "all";
+	const typeDescription =
+		reviewType === "uncommitted"
+			? "uncommitted working tree changes"
+			: reviewType === "committed"
+				? "committed changes"
+				: reviewType === "all"
+					? "committed + uncommitted local changes"
+					: `${reviewType} changes`;
+	const typeLabel = typeFlag ? `--type ${reviewType}` : "default --type all";
+	const parts = [`Scope: ${typeLabel} (${typeDescription})`];
+
+	const base = findFlagValue(args, ["--base"]);
+	const baseCommit = findFlagValue(args, ["--base-commit"]);
+	if (base) parts.push(`base ${base.value}`);
+	else if (baseCommit) parts.push(`base commit ${baseCommit.value}`);
+	else parts.push("base inferred by CodeRabbit");
+
+	const dir = findFlagValue(args, ["--dir"]);
+	if (dir) parts.push(`dir ${dir.value}`);
+
+	const files = findFlagValues(args, ["--files", "-f"]);
+	if (files.length > 0) {
+		const shown = files.slice(0, 3).join(", ");
+		parts.push(files.length > 3 ? `files ${shown}, +${files.length - 3} more` : `files ${shown}`);
+	}
+
+	return parts.join("; ");
+}
+
 function createReviewState(cwd: string, args: string[]): ReviewState {
 	const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 	return {
@@ -364,6 +429,7 @@ function buildWidgetLines(snapshot: ReviewSnapshot, theme: Theme): string[] {
 		: "CodeRabbit review running";
 	lines.push(theme.fg(done ? (success ? "success" : "warning") : "accent", title));
 	lines.push(theme.fg("dim", `$ ${formatCommand(snapshot.command, snapshot.args)}`));
+	lines.push(theme.fg("muted", formatReviewScope(snapshot.args)));
 
 	const phases = phasesForDisplay(snapshot.statuses);
 	const currentIndex = Math.max(0, phases.indexOf(snapshot.currentPhase ?? ""));
@@ -402,6 +468,7 @@ function buildProgressText(snapshot: ReviewSnapshot): string {
 	const latest = latestStatus(snapshot);
 	const lines = [
 		`CodeRabbit review in progress`,
+		formatReviewScope(snapshot.args),
 		`Status: ${humanize(latest?.phase)} / ${humanize(latest?.status)}`,
 		`Findings: ${snapshot.findingCount} (${summarizeSeverityCounts(snapshot.severityCounts)})`,
 		`Events: ${snapshot.reviewEventCount} review, ${snapshot.jsonEventCount} JSON total`,
@@ -733,6 +800,7 @@ async function buildResult(state: ReviewState): Promise<ReviewResult> {
 	const lines = [
 		`CodeRabbit review ${success ? "completed" : "failed"}`,
 		`Command: ${formatCommand(state.command, state.args)}`,
+		formatReviewScope(state.args),
 		`Duration: ${duration}`,
 		`Latest status: ${humanize(latest?.phase)} / ${humanize(latest?.status)}`,
 		`Findings: ${state.findings.length} (${summarizeSeverityCounts(countFindingsBySeverity(state.findings))})`,
@@ -936,7 +1004,7 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("coderabbit-review", {
-		description: "Run CodeRabbit CLI in --agent mode and show live review progress.",
+		description: "Run `coderabbit review --agent` with live progress. No args uses CodeRabbit default `--type all` scope.",
 		handler: async (args, ctx) => {
 			await runCommandReview(args, ctx);
 		},
@@ -979,11 +1047,12 @@ export default function piCodeRabbitExtension(pi: ExtensionAPI) {
 		name: TOOL_NAME,
 		label: TOOL_LABEL,
 		description:
-			"Run the CodeRabbit CLI in agent JSON mode, stream progress into pi's UI, and return the review output to the agent.",
-		promptSnippet: "Run CodeRabbit CLI review with live JSON progress/status UI.",
+			"Run `coderabbit review --agent`, stream progress into pi's UI, and return findings to the agent. With no args, CodeRabbit uses default `--type all`: committed + uncommitted local changes, with the base inferred by CodeRabbit.",
+		promptSnippet: "Run CodeRabbit CLI review with live JSON progress/status UI. Default scope is CodeRabbit `--type all`.",
 		promptGuidelines: [
 			"Use coderabbit_review when the user asks to run a CodeRabbit review or wants CodeRabbit feedback on the current changes.",
-			"The coderabbit_review tool already forces CodeRabbit --agent mode and parses JSONL status events for progress.",
+			"The coderabbit_review tool runs coderabbit review --agent and parses JSONL status events for progress.",
+			"If the user does not specify a review scope, coderabbit_review uses CodeRabbit's default --type all behavior: committed plus uncommitted local changes, with the base inferred by CodeRabbit.",
 		],
 		parameters: ReviewParamsSchema,
 		async execute(_toolCallId, params: ReviewParams, signal, onUpdate, ctx) {
