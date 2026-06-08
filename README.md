@@ -24,7 +24,7 @@ coderabbit auth login
 coderabbit auth status
 ```
 
-Override the binary if needed:
+By default, the extension runs `coderabbit` (falling back to `cr`). Override the binary if needed:
 
 ```bash
 PI_CODERABBIT_BIN=/path/to/coderabbit pi
